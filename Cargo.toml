@@ -8,4 +8,5 @@ edition = "2021"
 [dependencies]
 cpal = "0.13.4"
 anyhow = "1.0"
+interprocess = "1.1.1"
 crossterm = "0.20"

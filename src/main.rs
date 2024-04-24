@@ -3,6 +3,10 @@ use std::thread;
 use std::sync::mpsc::{channel, Sender, Receiver};
 use std::io::{self,BufRead};
 
+// プロセス間通信用のクレート
+use interprocess::local_socket::LocalSocketStream;
+use std::io::Write;
+
 mod constants;
 use constants::CHUNK_SIZE;
 
@@ -12,20 +16,13 @@ use firfilter::{create_filter, FilterType};
 mod agc;
 use agc::{create_agc, AGCType};
 
-use crossterm::{
-    execute,
-    cursor,
-    cursor::MoveTo,
-    terminal::{self, ClearType},
-    style::Print,
-};
-use std::io::stdout;
-
 // キーボードからの入力コマンドを表すEnum
 enum UiCommand {
     AM(i32),
     AGC(i32),
     AF(i32),
+    RSSI(String),
+    IFOUT(String),
     END,
 }
 
@@ -34,6 +31,8 @@ enum InternalCommand {
     AGC(AGCType),
     None,
     AF(FilterType),
+    RSSI(String),
+    IFOUT(String),
     END,
 }
 
@@ -45,6 +44,8 @@ impl UiCommand {
             ["AM", param] => param.parse().ok().map(UiCommand::AM),
             ["AGC", param] => param.parse().ok().map(UiCommand::AGC),
             ["AF", param] => param.parse().ok().map(UiCommand::AF),
+            ["RSSI", param] => param.parse().ok().map(UiCommand::RSSI),
+            ["IFOUT", param] => param.parse().ok().map(UiCommand::IFOUT),
             ["END"] => Some(UiCommand::END),
             _ => None,
         }
@@ -53,13 +54,6 @@ impl UiCommand {
 
 
 fn main() -> Result<(), anyhow::Error> {
-    let mut stdout = stdout();
-    _ = execute!(
-        stdout,
-        terminal::Clear(ClearType::All),
-        MoveTo(0, 0),
-        Print("Command: "),
-    );
 
     let host = cpal::default_host();
 
@@ -108,7 +102,7 @@ fn start_key_input_thread(tx: Sender<InternalCommand>) -> thread::JoinHandle<()>
             let internalcomm = match UiCommand::from_str(&line) {
                 Some(command) => {
                     // コマンドのデコード
-                    println!("OK                        ");
+                    println!("OK");
                     command_decode( command )
                 }
                 None => {
@@ -134,13 +128,6 @@ fn start_key_input_thread(tx: Sender<InternalCommand>) -> thread::JoinHandle<()>
                     break; // プログラムを終了する
                 }
             }
-            let mut stdout = stdout();
-            _ = execute!(
-            stdout,
-                MoveTo(9, 0),
-                Print("                        "),
-                MoveTo(9, 0),
-            );
         }
     })
 }
@@ -210,6 +197,8 @@ fn process_thread( if_rx: Receiver<[f32; CHUNK_SIZE]>, audio_tx: Sender<[f32; CH
     let mut if_filter = create_filter(FilterType::AM11K);
     let mut agc = create_agc(AGCType::AGC05);
     let mut af_filter = create_filter(FilterType::AF11K);
+    let mut rssi_path: String = "".to_string();
+    let mut receive_data_path: String = "".to_string();
 
     // 受信したデータに対する処理を行う
     loop {
@@ -230,42 +219,42 @@ fn process_thread( if_rx: Receiver<[f32; CHUNK_SIZE]>, audio_tx: Sender<[f32; CH
             InternalCommand::AF(FilterType::AF6K) => af_filter = create_filter(FilterType::AF6K),
             InternalCommand::AF(FilterType::AF11K) => af_filter = create_filter(FilterType::AF11K),
             InternalCommand::AF(_) => af_filter = create_filter(FilterType::None),
+            InternalCommand::RSSI(rssi_name) => {
+                if rssi_name != "None" {
+                    rssi_path = format!("/tmp/{}", rssi_name);    // /tmpの下に名前付きパイプを作る。
+                }
+                else {
+                    rssi_path = "".to_string();
+                }
+            },
+            InternalCommand::IFOUT(ifout_name) => {
+                if ifout_name != "None" {
+                    receive_data_path = format!("/tmp/{}", ifout_name);    // /tmpの下に名前付きパイプを作る。
+                }
+                else {
+                    receive_data_path = "".to_string();
+                }
+            },
             InternalCommand::None => {},
             InternalCommand::END => { break; },
         };
 
         // データ待ち
         let if_data: [f32; CHUNK_SIZE] = if_rx.recv().unwrap();
+
+
+        // 中間周波数のデータを名前付きパイプに出力する。
+        // 帯域の状態を表示することを想定している。
+        if !receive_data_output( &if_data, &receive_data_path ) { receive_data_path = "".to_string(); };
+
         // IFフィルタ
         let filtered = if_filter(&if_data);
 
         // AGC
         let (agc_data, rssi) = agc(&filtered);
 
-        // RSSI表示
-        let mut stdout = stdout();
-
-        // カーソル位置を保存する。
-        let cursor_position = cursor::position(); // Result型を返す
-        let (x, y) = match cursor_position {
-            Ok((x, y)) => (x, y),  // 成功した場合、座標を取得
-            Err(e) => {
-                eprintln!("カーソル位置を取得できませんでした: {}", e);
-                (0, 0)  // エラーが発生した場合、デフォルト値を使用
-            },
-        };
-        let mut int_rssi = (rssi/1e-10).log(10.0).round() as i32;
-        if int_rssi > 11 { int_rssi = 11; } 
-        if int_rssi < 0 { int_rssi = 0; } 
-        let rssi_string: String = std::iter::repeat("■").take(int_rssi as usize).collect();
-        _ = execute!(
-            stdout,
-            MoveTo(1, 3),
-            Print("                        "),
-            MoveTo(1, 3),
-            Print(rssi_string),
-            MoveTo(x, y),
-        );
+        // RSSI表示  表示に失敗したらfalseが返る。
+        if !rssi_output( rssi, &rssi_path ) { rssi_path = "".to_string(); };
 
         // 検波
         let det = agc_data.map( |x| (x.abs()-0.5)*2.0 );
@@ -308,6 +297,12 @@ fn command_decode( comm: UiCommand ) -> InternalCommand {
                     5..=8 => FilterType::AF6K,
                     9..=i32::MAX => FilterType::AF11K,
                 })
+        },
+        UiCommand::RSSI(param) => {
+            InternalCommand::RSSI(param)
+        },
+        UiCommand::IFOUT(param) => {
+            InternalCommand::IFOUT(param)
         },
         UiCommand::END => {
             InternalCommand::END
@@ -354,4 +349,49 @@ impl RingBuffer {
     fn available_data(&self) -> usize {
         self.size
     }
+}
+
+// RSSI データを名前付きパイプに出力する関数
+fn rssi_output( rssi: f32, rssi_path: &str ) -> bool {
+
+    let path = rssi_path;
+
+    if path != "" {
+        let rssi_pipe = LocalSocketStream::connect(path);
+        // RSSIを名前付きパイプに出力する。
+        if let Ok(mut rssi_pipe) = rssi_pipe {
+            let bytes = rssi.to_ne_bytes();  // RSSIをバイト列に変換する。
+            if let Err(e) = rssi_pipe.write_all(&bytes) {
+                println!("RSSI用名前付きパイプへの書き込みに失敗しました: {}", e);
+                return false;
+            }
+        } else {
+            println!("RSSI用名前付きパイプに出力できません。");
+            return false;
+        }
+    }
+    true
+}
+
+// 受信データを名前付きパイプに出力する関数
+fn receive_data_output( data: &[f32; CHUNK_SIZE], receive_data_path: &str ) -> bool {
+
+    let path = receive_data_path;
+
+    if path != "" {
+        let receive_data_pipe = LocalSocketStream::connect(path);
+        // 受信データを名前付きパイプに出力する。
+        if let Ok(mut receive_data_pipe) = receive_data_pipe {
+            // 配列をバイト列Vec<u8>にする。
+            let bytes = data.iter().flat_map(|&value| value.to_ne_bytes()).collect::<Vec<u8>>();
+            if let Err(e) = receive_data_pipe.write_all(&bytes) {
+                println!("受信データ用名前付きパイプへの書き込みに失敗しました: {}", e);
+                return false;
+            }
+        } else {
+            println!("受信データ用名前付きパイプに出力できません。");
+            return false;
+        }
+    }
+    true
 }
