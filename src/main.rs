@@ -16,24 +16,37 @@ use firfilter::{create_filter, FilterType};
 mod agc;
 use agc::{create_agc, AGCType};
 
+mod bfo;
+use bfo::create_bfo;
+
 // キーボードからの入力コマンドを表すEnum
 enum UiCommand {
     AM(i32),
+    USB(i32),
+    LSB(i32),
+    AMUSB(i32),
+    AMLSB(i32),
     AGC(i32),
     AF(i32),
     RSSI(String),
     IFOUT(String),
-    END,
+    BFO(f32),
+    EXIT,
 }
 
 enum InternalCommand {
     AM(FilterType),
+    USB(FilterType),
+    LSB(FilterType),
+    AMUSB(FilterType),
+    AMLSB(FilterType),
     AGC(AGCType),
     None,
     AF(FilterType),
     RSSI(String),
     IFOUT(String),
-    END,
+    BFO(f32),
+    EXIT,
 }
 
 impl UiCommand {
@@ -42,11 +55,16 @@ impl UiCommand {
         let parts: Vec<&str> = input.split_whitespace().collect();
         match parts.as_slice() {
             ["AM", param] => param.parse().ok().map(UiCommand::AM),
+            ["USB", param] => param.parse().ok().map(UiCommand::USB),
+            ["LSB", param] => param.parse().ok().map(UiCommand::LSB),
+            ["AMUSB", param] => param.parse().ok().map(UiCommand::AMUSB),
+            ["AMLSB", param] => param.parse().ok().map(UiCommand::AMLSB),
             ["AGC", param] => param.parse().ok().map(UiCommand::AGC),
             ["AF", param] => param.parse().ok().map(UiCommand::AF),
             ["RSSI", param] => param.parse().ok().map(UiCommand::RSSI),
             ["IFOUT", param] => param.parse().ok().map(UiCommand::IFOUT),
-            ["END"] => Some(UiCommand::END),
+            ["BFO",param] => param.parse().ok().map(UiCommand::BFO),
+            ["EXIT"] => Some(UiCommand::EXIT),
             _ => None,
         }
     }
@@ -116,7 +134,7 @@ fn start_key_input_thread(tx: Sender<InternalCommand>) -> thread::JoinHandle<()>
             else {
                 let mut finished = false;
                 // 処理スレッドにコマンドを送信する。
-                if let InternalCommand::END = internalcomm {
+                if let InternalCommand::EXIT = internalcomm {
                     finished = true;
                 }
                 if tx.send( internalcomm ).is_err() {
@@ -199,6 +217,8 @@ fn process_thread( if_rx: Receiver<[f32; CHUNK_SIZE]>, audio_tx: Sender<[f32; CH
     let mut af_filter = create_filter(FilterType::AF11K);
     let mut rssi_path: String = "".to_string();
     let mut receive_data_path: String = "".to_string();
+    let mut bfo_freq:f32 = 0.0;
+    let mut bfo = create_bfo();
 
     // 受信したデータに対する処理を行う
     loop {
@@ -219,6 +239,20 @@ fn process_thread( if_rx: Receiver<[f32; CHUNK_SIZE]>, audio_tx: Sender<[f32; CH
             InternalCommand::AF(FilterType::AF6K) => af_filter = create_filter(FilterType::AF6K),
             InternalCommand::AF(FilterType::AF11K) => af_filter = create_filter(FilterType::AF11K),
             InternalCommand::AF(_) => af_filter = create_filter(FilterType::None),
+            InternalCommand::USB(FilterType::USB3K) => if_filter = create_filter(FilterType::USB3K),
+            InternalCommand::USB(FilterType::USB2K) => if_filter = create_filter(FilterType::USB2K),
+            InternalCommand::USB(_) => if_filter = create_filter(FilterType::None),
+            InternalCommand::LSB(FilterType::LSB3K) => if_filter = create_filter(FilterType::LSB3K),
+            InternalCommand::LSB(FilterType::LSB2K) => if_filter = create_filter(FilterType::LSB2K),
+            InternalCommand::LSB(_) => if_filter = create_filter(FilterType::None),
+            InternalCommand::AMUSB(FilterType::AMUSB3K) => if_filter = create_filter(FilterType::AMUSB3K),
+            InternalCommand::AMUSB(FilterType::AMUSB6K) => if_filter = create_filter(FilterType::AMUSB6K),
+            InternalCommand::AMUSB(FilterType::AMUSB7K) => if_filter = create_filter(FilterType::AMUSB7K),
+            InternalCommand::AMUSB(_) => if_filter = create_filter(FilterType::None),
+            InternalCommand::AMLSB(FilterType::AMLSB3K) => if_filter = create_filter(FilterType::AMLSB3K),
+            InternalCommand::AMLSB(FilterType::AMLSB6K) => if_filter = create_filter(FilterType::AMLSB6K),
+            InternalCommand::AMLSB(FilterType::AMLSB7K) => if_filter = create_filter(FilterType::AMLSB7K),
+            InternalCommand::AMLSB(_) => if_filter = create_filter(FilterType::None),
             InternalCommand::RSSI(rssi_name) => {
                 if rssi_name != "None" {
                     rssi_path = format!("/tmp/{}", rssi_name);    // /tmpの下に名前付きパイプを作る。
@@ -235,8 +269,11 @@ fn process_thread( if_rx: Receiver<[f32; CHUNK_SIZE]>, audio_tx: Sender<[f32; CH
                     receive_data_path = "".to_string();
                 }
             },
+            InternalCommand::BFO(freq) => {
+                bfo_freq = freq;
+            },
             InternalCommand::None => {},
-            InternalCommand::END => { break; },
+            InternalCommand::EXIT => { break; },
         };
 
         // データ待ち
@@ -251,11 +288,17 @@ fn process_thread( if_rx: Receiver<[f32; CHUNK_SIZE]>, audio_tx: Sender<[f32; CH
         let filtered = if_filter(&if_data);
 
         // AGC
-        let (agc_data, rssi) = agc(&filtered);
+        let (mut agc_data, rssi) = agc(&filtered);
 
         // RSSI表示  表示に失敗したらfalseが返る。
         if !rssi_output( rssi, &rssi_path ) { rssi_path = "".to_string(); };
 
+        if bfo_freq != 0.0 {
+            let bfo_signal=bfo( bfo_freq );
+            for i in 0..CHUNK_SIZE {
+                agc_data[i] = agc_data[i] + bfo_signal[i];
+            }
+        }
         // 検波
         let det = agc_data.map( |x| (x.abs()-0.5)*2.0 );
 
@@ -277,6 +320,40 @@ fn command_decode( comm: UiCommand ) -> InternalCommand {
                     5..=8 => FilterType::AM6K,
                     9..=13 => FilterType::AM11K,
                     14..=i32::MAX => FilterType::None,
+                })
+        },
+        UiCommand::USB(param) => {
+            InternalCommand::USB(
+                match param {
+                    i32::MIN..=2 => FilterType::USB2K,
+                    3..=4 => FilterType::USB3K,
+                    5..=i32::MAX => FilterType::None,
+                })
+        },
+        UiCommand::LSB(param) => {
+            InternalCommand::LSB(
+                match param {
+                    i32::MIN..=2 => FilterType::LSB2K,
+                    3..=4 => FilterType::LSB3K,
+                    5..=i32::MAX => FilterType::None,
+                })
+        },
+        UiCommand::AMUSB(param) => {
+            InternalCommand::AMUSB(
+                match param {
+                    i32::MIN..=4 => FilterType::AMUSB3K,
+                    5..=6 => FilterType::AMUSB6K,
+                    7..=8 => FilterType::AMUSB7K,
+                    9..=i32::MAX => FilterType::None,
+                })
+        },
+        UiCommand::AMLSB(param) => {
+            InternalCommand::AMLSB(
+                match param {
+                    i32::MIN..=4 => FilterType::AMLSB3K,
+                    5..=6 => FilterType::AMLSB6K,
+                    7..=8 => FilterType::AMLSB7K,
+                    9..=i32::MAX => FilterType::None,
                 })
         },
         UiCommand::AGC(param) => {
@@ -304,8 +381,11 @@ fn command_decode( comm: UiCommand ) -> InternalCommand {
         UiCommand::IFOUT(param) => {
             InternalCommand::IFOUT(param)
         },
-        UiCommand::END => {
-            InternalCommand::END
+        UiCommand::BFO(param) => {
+            InternalCommand::BFO(param)
+        },
+        UiCommand::EXIT => {
+            InternalCommand::EXIT
         },
     }
 }
