@@ -67,12 +67,12 @@ fn debug_filtertype_print( fselect: &FilterType) {
         FilterType::USB2K => println!("USB2K"),
         FilterType::LSB3K => println!("LSB3K"),
         FilterType::LSB2K => println!("LSB2K"),
-        FilterType::AMUSB3K => println!("USB3K"),
-        FilterType::AMUSB6K => println!("USB6K"),
-        FilterType::AMUSB7K => println!("USB7K"),
-        FilterType::AMLSB3K => println!("USL3K"),
-        FilterType::AMLSB6K => println!("USL6K"),
-        FilterType::AMLSB7K => println!("USL7K"),
+        FilterType::AMUSB3K => println!("AMUSB3K"),
+        FilterType::AMUSB6K => println!("AMUSB6K"),
+        FilterType::AMUSB7K => println!("AMUSB7K"),
+        FilterType::AMLSB3K => println!("AMLSB3K"),
+        FilterType::AMLSB6K => println!("AMLSB6K"),
+        FilterType::AMLSB7K => println!("AMLSB7K"),
         FilterType::None => println!("Filter None"),
     };
 }
